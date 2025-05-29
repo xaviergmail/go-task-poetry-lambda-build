@@ -1,0 +1,9 @@
+[tools]
+node = "20"
+poetry = "2"
+python = "3.12"
+taplo = "latest"
+task = "latest"
+
+[env]
+POETRY_VIRTUALENVS_IN_PROJECT = "true"

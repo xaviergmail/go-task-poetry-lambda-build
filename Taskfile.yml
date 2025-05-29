@@ -1,0 +1,76 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: 3
+
+vars:
+  OUT: ./lambda_build
+  IMAGE: public.ecr.aws/sam/build-python3.12
+  PLATFORM: linux/amd64
+  DIR: "{{.DIR | default .USER_WORKING_DIR}}"
+
+set: [pipefail]
+shopt: [globstar]
+
+# output:
+#   group:
+#     begin: "::group::{{.TASK}} ({{.DIR}})"
+#     end: "::endgroup::"
+#     error_only: false
+
+tasks:
+  clean:
+    dir: "{{.DIR}}"
+    cmds:
+      - rm -rf "{{.OUT}}"
+      - mkdir -p "{{.OUT}}/code"
+      - mkdir -p "{{.OUT}}/layer/python"
+
+  export:
+    deps: [clean]
+    dir: "{{.DIR}}"
+    cmds:
+      - poetry export --without-hashes --format=requirements.txt --output "{{.OUT}}/requirements.txt"
+      - grep -Ev 'file://' "{{.OUT}}/requirements.txt" > "{{.OUT}}/requirements-remote.txt"
+      - touch "{{.OUT}}/requirements-local.txt"
+      - cmd: grep -E 'file://' "{{.OUT}}/requirements.txt" | sed -E 's/^-e //' > "{{.OUT}}/requirements-local.txt"
+        ignore_error: true
+
+  build-code:
+    dir: "{{.DIR}}"
+    cmds:
+      # Install the current package *and* all locally editable packages in code bundle
+      # All the other dependencies (including transitive ones) are in requirements-remote.txt
+      # and will be provided in the requirements layer
+      - |
+        pip install . \
+          -r "{{.OUT}}/requirements-local.txt" \
+          --no-deps \
+          --target "{{.OUT}}/code"
+      - sync
+      - rm -rf "{{.OUT}}"/code/*.dist-info
+      - cd "{{.OUT}}/code" && zip -r -0 -q ../code.zip .
+
+  build-layer:
+    dir: "{{.DIR}}"
+    cmds:
+      - |
+        docker run --rm \
+          --platform {{.PLATFORM}} \
+          -v {{.OUT}}:/opt/build \
+          -v ~/.netrc:/root/.netrc \
+          {{.IMAGE}} \
+          bash -c "python -m venv /opt/venv && /opt/venv/bin/pip install -r /opt/build/requirements-remote.txt -t /opt/build/layer/python"
+      - cd "{{.OUT}}/layer" && zip -r -0 -q ../layer.zip .
+
+  bundle:
+    dir: "{{.DIR}}"
+    cmds:
+      - task: export
+      - task: bundle-parallel
+
+  default:
+    cmds:
+      - task: bundle
+
+  bundle-parallel:
+    internal: true
+    deps: [build-code, build-layer]
