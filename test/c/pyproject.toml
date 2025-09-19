@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "c"
+version = "0.1.0"
+description = ""
+authors = ["Xavier Bergeron <xavbergeron@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+icecream = "^2.1.8"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+name = "pypi"
+priority = "primary"

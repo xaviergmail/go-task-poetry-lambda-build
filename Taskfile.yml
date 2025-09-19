@@ -2,10 +2,20 @@
 version: 3
 
 vars:
-  OUT: ./lambda_build
-  IMAGE: public.ecr.aws/sam/build-python3.12
-  PLATFORM: linux/amd64
-  DIR: "{{.DIR | default .USER_WORKING_DIR}}"
+  EPOCH: '946684800' # 2000-01-01T00:00:00Z
+  STAMP: '200001010000' # 2000-01-01T00:00:00Z
+
+  DIR: '{{.DIR | default .USER_WORKING_DIR}}'  # Path to the Poetry project to bundle
+  OUT: '{{.OUT | default "./lambda_build"}}'  # ! relative to DIR !
+
+  IMAGE: '{{.IMAGE | default "public.ecr.aws/sam/build-python3.12"}}'  # Target your desired Lambda runtime
+  PLATFORM: '{{.PLATFORM | default "linux/amd64"}}'  # Target your desired Lambda runtime platform, NOT your development platform
+
+  CODE_ZIP_LEVEL: '{{.CODE_ZIP_LEVEL | default "0"}}' # code compression: 0=store (no compression), 6=medium, 9=max
+  LAYER_ZIP_LEVEL: '{{.LAYER_ZIP_LEVEL | default "0"}}' # layer compression: 0=store (no compression), 6=medium 9=max
+
+  PRECOMPILE: '{{.PRECOMPILE | default "true"}}'  # whether to generate .pyc's - on: slightly faster Lambda cold starts, off: faster bundling
+  INVALIDATION_MODE: '{{.INVALIDATION_MODE | default "unchecked-hash"}}'  # checked-hash is slower, but technically 'safer'. Read Python docs!
 
 set: [pipefail]
 shopt: [globstar]
@@ -37,17 +47,28 @@ tasks:
   build-code:
     dir: "{{.DIR}}"
     cmds:
-      # Install the current package *and* all locally editable packages in code bundle
-      # All the other dependencies (including transitive ones) are in requirements-remote.txt
-      # and will be provided in the requirements layer
       - |
-        pip install . \
-          -r "{{.OUT}}/requirements-local.txt" \
-          --no-deps \
-          --target "{{.OUT}}/code"
-      - sync
-      - rm -rf "{{.OUT}}"/code/*.dist-info
-      - cd "{{.OUT}}/code" && zip -r -0 -q ../code.zip .
+        pip install . -r "{{.OUT}}/requirements-local.txt" --no-deps --target "{{.OUT}}/code" {{if eq .PRECOMPILE "false"}}--no-compile{{end}}
+      - |
+        docker run --rm \
+          --platform {{.PLATFORM}} \
+          -v {{.OUT}}:/opt/build \
+          {{.IMAGE}} \
+          bash -c 'set -euo pipefail; \
+            export PYTHONHASHSEED=0 SOURCE_DATE_EPOCH={{.EPOCH}}; \
+            if [ "{{.PRECOMPILE}}" = "true" ]; then \
+              python -m compileall -q -f --invalidation-mode={{.INVALIDATION_MODE}} -d /var/task /opt/build/code; \
+            else \
+              find /opt/build/code -name "__pycache__" -type d -prune -exec rm -rf {} +; \
+              find /opt/build/code -name '*.pyc' -delete; \
+            fi'
+      - |
+        if [ "{{.PRECOMPILE}}" = "false" ]; then
+          find "{{.OUT}}/code" -name "__pycache__" -type d -prune -exec rm -rf {} +
+          find "{{.OUT}}/code" -name '*.pyc' -delete
+        fi
+      - find "{{.OUT}}/code" -type f -exec touch -t {{.STAMP}} {} +
+      - (cd "{{.OUT}}/code" && LC_ALL=C find . -type f | sort | zip -X -q -{{.CODE_ZIP_LEVEL}} ../code.zip -@)
 
   build-layer:
     dir: "{{.DIR}}"
@@ -56,14 +77,28 @@ tasks:
         docker run --rm \
           --platform {{.PLATFORM}} \
           -v {{.OUT}}:/opt/build \
-          -v ~/.netrc:/root/.netrc \
           {{.IMAGE}} \
-          bash -c "python -m venv /opt/venv && /opt/venv/bin/pip install -r /opt/build/requirements-remote.txt -t /opt/build/layer/python"
-      - cd "{{.OUT}}/layer" && zip -r -0 -q ../layer.zip .
+          bash -c 'set -euo pipefail; \
+            pip install --no-cache-dir {{if eq .PRECOMPILE "false"}}--no-compile{{end}} -r /opt/build/requirements-remote.txt -t /opt/build/layer/python; \
+            export PYTHONHASHSEED=0 SOURCE_DATE_EPOCH={{.EPOCH}}; \
+            if [ "{{.PRECOMPILE}}" = "true" ]; then \
+              python -m compileall -q -f --invalidation-mode={{.INVALIDATION_MODE}} -d /opt/python /opt/build/layer/python; \
+            else \
+              find /opt/build/layer/python -name "__pycache__" -type d -prune -exec rm -rf {} +; \
+              find /opt/build/layer/python -name '*.pyc' -delete; \
+            fi'
+      - |
+        if [ "{{.PRECOMPILE}}" = "false" ]; then
+          find "{{.OUT}}/layer" -name "__pycache__" -type d -prune -exec rm -rf {} +
+          find "{{.OUT}}/layer" -name '*.pyc' -delete
+        fi
+      - find "{{.OUT}}/layer" -type f -exec touch -t {{.STAMP}} {} +
+      - (cd "{{.OUT}}/layer" && LC_ALL=C find . -type f | sort | zip -X -q -{{.LAYER_ZIP_LEVEL}} ../layer.zip -@)
 
   bundle:
     dir: "{{.DIR}}"
     cmds:
+      - cmd: 'echo "DIR: {{.DIR}}, OUT: {{.OUT}}, PWD: $(pwd)"'
       - task: export
       - task: bundle-parallel
 
