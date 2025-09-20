@@ -1,0 +1,161 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: 3
+
+includes:
+  bundle-one:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/test_one
+  bundle-two:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/test_two
+
+  bundle-one-med:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/med_test_one
+      CODE_ZIP_LEVEL: 6
+      LAYER_ZIP_LEVEL: 6
+  bundle-two-med:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/med_test_two
+      CODE_ZIP_LEVEL: 6
+      LAYER_ZIP_LEVEL: 6
+
+  bundle-one-high:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/high_test_one
+      CODE_ZIP_LEVEL: 9
+      LAYER_ZIP_LEVEL: 9
+  bundle-two-high:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/high_test_two
+      CODE_ZIP_LEVEL: 9
+      LAYER_ZIP_LEVEL: 9
+
+  bundle-one-nopyc:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/nopyc_test_one
+      PRECOMPILE: "false"
+  bundle-two-nopyc:
+    taskfile: ../Taskfile.yml
+    vars:
+      DIR: ./a
+      OUT: ../tmp/nopyc_test_two
+      PRECOMPILE: "false"
+
+output: prefixed
+
+tasks:
+  verify-checksum:
+    internal: true
+    silent: true
+    cmds:
+      - |
+        set -euo pipefail
+        ROOT="tmp"
+        BASE1="{{.PREFIX}}_one"
+        BASE2="{{.PREFIX}}_two"
+        # GNU/BSD
+        hash() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+
+        CODE1="$(hash "$ROOT/$BASE1/code.zip")"
+        LAYER1="$(hash "$ROOT/$BASE1/layer.zip")"
+        CODE2="$(hash "$ROOT/$BASE2/code.zip")"
+        LAYER2="$(hash "$ROOT/$BASE2/layer.zip")"
+
+        echo '--- Checksums ---'
+        printf 'code.zip (%s):  %s\n' "$BASE1" "$CODE1"
+        printf 'code.zip (%s):  %s\n' "$BASE2" "$CODE2"
+        printf 'layer.zip (%s): %s\n' "$BASE1" "$LAYER1"
+        printf 'layer.zip (%s): %s\n' "$BASE2" "$LAYER2"
+        echo '-----------------'
+
+        mismatch=0
+        [ "$CODE1"  = "$CODE2" ] || { echo 'Mismatch: code.zip'; mismatch=1; }
+        [ "$LAYER1" = "$LAYER2" ] || { echo 'Mismatch: layer.zip'; mismatch=1; }
+        if [ $mismatch -ne 0 ]; then
+          echo "Determinism check FAILED for prefix '{{.PREFIX}}'"; exit 1; fi
+        echo "Determinism check PASSED ({{.PREFIX}})"
+
+  test-checksum:
+    desc: Build two bundles (level 0) and compare checksums
+    deps: [bundle-one, bundle-two]
+    cmds:
+      - task: verify-checksum
+        vars:
+          PREFIX: test
+
+  test-checksum-med:
+    desc: Build two bundles (medium compression) and compare checksums
+    deps: [bundle-one-med, bundle-two-med]
+    cmds:
+      - task: verify-checksum
+        vars:
+          PREFIX: med_test
+
+  test-checksum-high:
+    desc: Build two bundles (high compression) and compare checksums
+    deps: [bundle-one-high, bundle-two-high]
+    cmds:
+      - task: verify-checksum
+        vars:
+          PREFIX: high_test
+
+  test-checksum-nopyc:
+    desc: Build two bundles (no precompile) and compare checksums
+    deps: [bundle-one-nopyc, bundle-two-nopyc]
+    cmds:
+      - task: verify-checksum
+        vars:
+          PREFIX: nopyc_test
+
+  test-all:
+    desc: Run all determinism checksum variants
+    deps: [test-checksum, test-checksum-med, test-checksum-high, test-checksum-nopyc]
+
+  validate-build:
+    desc: Validate build directory contents (packages in correct bundle)
+    deps: [bundle-one]
+    cmds:
+      - |
+        set -euo pipefail
+        ROOT="tmp/test_one"
+        CODE="$ROOT/code"
+        LAYER="$ROOT/layer/python"
+        for pkg in a b c; do
+          test -d "$CODE/$pkg" || { echo "Missing $pkg in code dir"; exit 1; }
+        done
+        for pkg in pydantic icecream; do
+          if [ -d "$CODE/$pkg" ]; then echo "$pkg should not be in code directory"; exit 1; fi
+        done
+        for pkg in pydantic icecream; do
+          if [ ! -d "$LAYER/$pkg" ]; then echo "$pkg missing from layer"; ls -1 "$LAYER" || true; exit 1; fi
+        done
+        for pkg in a b c; do
+          if [ -d "$LAYER/$pkg" ]; then echo "$pkg should not be in layer"; exit 1; fi
+        done
+        echo 'Validation succeeded.'
+
+  validate-zips:
+    desc: Ensure artifact zips exist
+    deps: [bundle-one]
+    cmds:
+      - test -f tmp/test_one/code.zip || (echo 'code.zip missing' && exit 1)
+      - test -f tmp/test_one/layer.zip || (echo 'layer.zip missing' && exit 1)
+
+  validate-all:
+    desc: Run validation plus determinism
+    deps: [validate-build, validate-zips, test-all]
